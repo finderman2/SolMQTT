@@ -29,20 +29,20 @@ debug = 1
 ''' 
 ### MQTT Settings ###
 '''
-# broker_address="test.mosquitto.org"
-# mqttclient = mqtt.Client("classicCC") #create new instance
-#
-# #Try connecting to our broker...
-# try:
-#     mqttclient.connect(broker_address, port=1883) #connect to broker
-# except:
-#     print("Broker Connection Failed")
+broker_address="test.mosquitto.org"
+mqttclient = mqtt.Client("classicCC") #create new instance
+
+#Try connecting to our broker...
+try:
+    mqttclient.connect(broker_address, port=1883) #connect to broker
+except:
+    print("Broker Connection Failed")
 
 ''' 
 ### Midnite Charge Controller Settings ###
 Add your serial number and IP address here
 '''
-HOST = '192.168.1.20'
+HOST = '192.168.1.22'
 CCNAME = "SE5000"
 client = ModbusClient(host=HOST, port=502, auto_open=True)
 
@@ -63,11 +63,11 @@ def close():
 	client.close()
 
 def readAll():
-    global PHTYP, ACISF, ACITOT,ACIA, ACIB, ACIC, ACVSF, ACVAB, ACFREQSF, ACFREQ, ACWHLFSF, ACWHLF, DCVSF, DCV
+    global PHTYP, ACISF, ACITOT, ACIA, ACIB, ACIC, ACVSF, ACVAB, ACVAN, ACVBN, ACW, ACFREQSF, ACFREQ, ACWHLFSF, ACWHLF, DCVSF, DCISF, DCV, DCI, DCW, HTSINKT, STATUSCODE, STATUS
     print("Reading...")
     global client
     base = 40070
-    rq = client.read_holding_registers(base,39)    
+    rq = client.read_holding_registers(40069, 40) #start at 69 to get correct readings  
     if debug > 0:
         print("Register Dump: ") #dump out the whole register
         print(rq)
@@ -82,16 +82,20 @@ def readAll():
     PHTYP = rq[40070-base] # sunspec DID 101=1ph 102=split ph 103=3ph
     
     #AC inverter values
-    ACISF = rq[40076-base] #ac current scale factor
-    ACITOT = rq[40072-base] #total ac current
+    ACISF = 0.001 #ac current scale factor
+    ACITOT = rq[40072-base] * ACISF #total ac current
     ACIA = rq[40073-base] #AC current leg A
     ACIB = rq[40074-base] #AC current leg B
         
-    ACVSF = rq[40083-base] #ac volts scale factor
-    ACVAB = rq[40077-base] #ac volts A-B
+    ACVSF = 0.1 #ac volts scale factor
+    ACVAB = rq[40077-base] * ACVSF #ac volts A-B
+    ACVAN = rq[40080-base] * ACVSF #ac volts A to nuetral
+    ACVBN = rq[40081-base] * ACVSF #ac volts B to nuetral
+    ACW   = rq[40085-base] * 0.1
     
-    ACFREQSF = rq[40087-base] #ac freq scale factor
+    ACFREQSF = 0.001 #ac freq scale factor
     ACFREQ = rq[40086-base] #ac freq
+    
     ACWHLFSF = rq[40096-base] #ac lifetime wh production scale factor
     ACWHLF = rq[40094-base] #ac lifetime wh production
     
@@ -100,16 +104,73 @@ def readAll():
         ACIC = rq[40075-base] #AC current leg C
     
     #DC Array values
-    DCVSF = rq[40099-base] #dc volts scale factor
-    DCV = rq[40100-base] * DCVSF #dc volts
+    DCVSF = 0.1 # dc volts scale factor
+    DCISF = 0.001 # dc current scale factor
+    DCV = rq[40099-base] * DCVSF # DC volts
+    DCI = rq[40097-base] * DCISF # DC current
+    DCW = rq[40101-base] * 0.1 # DC power
     
+    #Temperature values
+    HTSINKT = rq[40104-base] * 0.01 #heatsink temp C
     
+    STATUSCODE = rq[40108-base] #inverter status 1=Off, 2=Sleeping/Night 4=On/MPPT
+    if (STATUSCODE == 1):
+        STATUS = "Off"
+    elif (STATUSCODE == 2):
+        STATUS = "Sleeping/Night"
+    elif (STATUSCODE == 4):
+        STATUS = "On - MPPT"
+    else:
+        STATUS = "Error No State"    
+    
+    # ACVAB = rq[6] * 0.1
+#     DCV = rq[28] * 0.1 #NEW dc volts
+#     ACW = rq[17] * 0.1 #NEW AC power
+#     ACITOT = rq[2] * 0.001 # total AC current reg 1,2
+#     ACIT = ACW / ACVAB #AC Current
 
 def monitor():
     readAll()
-    print("PV voltage: "+str(DCV))
     now = datetime.datetime.utcnow()
+    print(now)
+    print("Inverter Status: "+STATUS + "\n")
     
+    print("DC Volts: "+str(DCV))
+    print("DC current: "+str(DCI))
+    print("DC power: "+str(DCW) + "\n")
+    
+    print("AC Volts: "+str(ACVAB))
+    print("AC Volts L1: "+str(ACVAN))
+    print("AC Volts L2: "+str(ACVBN))
+    
+    print("AC current (sum): "+str(ACITOT))
+    print("AC power: "+str(ACW) + "\n")
+    
+    print("Heatsink Temp C: "+str(HTSINKT))
+
+def mqttPub():
+    readAll()
+    print("Publishing to broker...: ")
+    #Realtime voltage and current
+    mqttclient.publish(DEVNAME+"/device/status", STATUS)
+    
+    mqttclient.publish(DEVNAME+"/DC/volts", DCV)
+    mqttclient.publish(DEVNAME+"/DC/amps", DCI)
+    mqttclient.publish(DEVNAME+"/DC/watts", DCW)
+    
+    mqttclient.publish(DEVNAME+"/AC/volts", ACVAB)
+    mqttclient.publish(DEVNAME+"/AC/L1", ACVAN)
+    mqttclient.publish(DEVNAME+"/AC/L2", ACVBN)
+    
+    mqttclient.publish(DEVNAME+"/AC/totalamps", ACITOT)
+    mqttclient.publish(DEVNAME+"/AC/watts", ACW)
+    
+    #Accumulators
+    mqttclient.publish(DEVNAME+"/AC/lifetimeWh", ACWHLF)
+    
+    #Temps cc stand for charge controller
+    mqttclient.publish(DEVNAME+"/temps/heatsink", HTSINKT)
+   
 def main(argv):
     global client		
 
