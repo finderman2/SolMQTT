@@ -9,6 +9,8 @@ https://github.com/sourceperl/pyModbusTCP
 paho-mqtt
 '''
 
+from __future__ import print_function
+
 from pyModbusTCP.client import ModbusClient
 import sys
 import logging
@@ -24,6 +26,7 @@ mqttEnable = 1
 logging.basicConfig()
 log = logging.getLogger()
 log.setLevel(logging.DEBUG) #Debug ON
+debug = 0
 
 ''' 
 ### MQTT Settings ###
@@ -39,14 +42,17 @@ except:
     print("Broker Connection Failed")
 
 ''' 
-### Midnite Charge Controller Settings ###
-Add your serial number and IP address here
+### Device Settings ###
+Add your device name and IP address, and MODBUS ID here
 '''
-HOST = '192.168.1.5'
+HOST = '192.168.8.170'
 DEVNAME = "conextSW4048" ## Name used in prefix for MQTT publish
-MODBUSID = 91
+MODBUSID = 90
 
 client = ModbusClient(host=HOST, port=502, unit_id=MODBUSID, auto_open=True)
+
+def twoComp(number):
+    return (0xffff - number) >> 1
 
 def connect():
 	global client
@@ -63,12 +69,6 @@ def connect():
 def close():
 	global client
 	client.close()
-
-def limitCurrent(current):
-    global client
-    print "Limiting current to: "+str(current)
-    rq = client.write_register(4147, int(current*10))
-    assert(rq.function_code < 0x80) 
 
 
 def invStatus(status):
@@ -114,139 +114,117 @@ def wMap(status):
     return codes.get(status, "Invalid warning code")
 
 def readAll():
-    global LOADAC1VOLT, LOADPOWER, LOADPOWERVA, INVOLT, INCURR, INPOWER, CHGRSTAT, BTEMP, BATKWHTDY
-    print "Reading..."
+    global INVSTAT, WMAP, LOADACVOLT, LOADACCURR, LOADACPOWER, LOADPOWERVA, LOADACFREQ, BATTVOLTS, BATTCURR, BATTWATTS, INVPOWER, CHGRSTAT, BTEMP, BATKWHTDY
+    print("Reading...")
     global client
     base = 0x0040
-    rq = client.read_holding_registers(base, 120)
-    #print(rq)
+    rq = client.read_holding_registers(base, 122)
+    if debug > 0:
+        print("Register Dump: ") #dump out the whole register
+        print(rq)
     
-    #print(rq[0x49])
-    #print("end test")
+        i=0 # go over each item and print it with it's position
+        for item in rq:
+            print("Reg"+str(i)+": ", end='')
+            print(rq[i])
+            i = i+1
     
-    if rq != None:
+    if (rq is not None):
         #AC Side
-        LOADACVOLT = rq[0x0078-base]*0.001
-        LOADPOWER = rq[0x0084-base]
-        LOADPOWERVA = rq[0x008a-base]
+	LOADACVOLT = ((rq[0x0079-base] << 16) + rq[0x0078-base]) * 0.001
+        LOADACCURR = ((rq[0x0083-base] << 16) + rq[0x0082-base]) * 0.001
+	LOADACPOWER = ((rq[0x0085-base] << 16) + rq[0x0084-base])
+        LOADPOWERVA = ((rq[0x0089-base] << 16) + rq[0x0088-base])
+	LOADACFREQ = rq[0x008a-base] * 0.01	
         
         #DC side
-        INVOLT = rq[0x004e-base] * 0.001
-        INCURR = rq[0x0050-base] * 0.001 #WRONG VALUE, needs to be 2s comp
-        INPOWER = rq[0x0052-base] #WRONG VALUE, needs to be 2s comp
+        BATTVOLTS = ((rq[0x004f-base] << 16) + rq[0x004e-base]) * 0.001
+        BATTCURR = ((rq[0x0051-base] << 16) + rq[0x0050-base]) * 0.001 # needs to be 2s comp
+        BATTWATTS = ((rq[0x0059-base] << 16) + rq[0x0058-base])
         BTEMP = (rq[0x0054-base] * 0.01 ) + -273
+        
+        INVPOWER = rq[0x0058-base]
         
         #Extras
         BATKWHTDY = rq[0x0094-base] * 0.001
         INVSTAT = invStatus(rq[0x004b-base]) ##return inverter status string from code
         WMAP = wMap(rq[0x004a-base]) ##return inverter warning message from code        
     else:
-        LOADAC1VOLT = 0 
-        LOADAC2VOLT = 0
-        OUTPOWER = 0
-        INVOLT = 0
-        INCURR = 0
-        INPOWER = 0
         print("Request failed")
-    
-    print("\nOutput")
-    print("Inverter Status: "+str(INVSTAT))
-    print("Warning Status: "+str(WMAP))
-    print("AC Volts: "+ str(LOADACVOLT))
-    print("AC Power: "+ str(LOADPOWER))
-    print("AC Power Apparent: "+ str(LOADPOWERVA)) #WRONG VALUE returned
-    print("\nInput")
-    print("Input Volts: " + str(INVOLT))
-    print("Input Current: " + str(INCURR))
-    print("Input Power: " + str(INPOWER))
-    print("Battery Temp: " + str(BTEMP))
-    print("Battery kWh Today: " + str(BATKWHTDY))
-
-def forcefloat():
-    print "Forcing float"
-    global client
-    rq = client.write_register(4159,0x20)
-    assert(rq.function_code < 0x80) 
-
-def forcebulk():
-    print "Forcing bulk"
-    global client
-    rq = client.write_register(4159,0x40)
-    assert(rq.function_code < 0x80) 
 
 def monitor():
     readAll()
-    ##print("Battery voltage: "+str(BATTV))
+    print("\nOutput")
+    print("Inverter Status: "+str(INVSTAT))
+    print("Warning Status: "+str(WMAP)+"\n")
+    print("AC Volts: "+ str(LOADACVOLT))
+    print("AC Current: "+ str(LOADACCURR))
+    print("AC Freq: "+ str(LOADACFREQ))
+    print("AC Power: "+ str(LOADPOWER))
+    print("AC Power Apparent: "+ str(LOADPOWERVA)) #WRONG VALUE returned
+    print("\nInput")
+    print("Input Volts: " + str(BATTVOLTS))
+    print("Input Current: " + str(BATTCURR))
+    print("Input Power: " + str(BATTWATTS))
+    print("Invert Power: " + str(INVPOWER))
+    print("Battery Temp: " + str(BTEMP))
+    print("Battery kWh Today: " + str(BATKWHTDY))
 
 def mqttPub():
     readAll()
     print("Publishing to broker...: ")
-    #Realtime voltage and current
-    mqttclient.publish(DEVNAME+"/bat/BattV", INVOLT)
-    mqttclient.publish(DEVNAME+"/bat/BattCurr", INCURR)
     
-    #Accumulators
-    mqttclient.publish(DEVNAME+"/bat/kwhToday", BATKWHTDY)
-    mqttclient.publish(DEVNAME+"/bat/watts", INPOWER)
-    mqttclient.publish(DEVNAME+"/bat/ah", AH)
+    mqttclient.publish(DEVNAME+"/device/status", INVSTAT)
+    mqttclient.publish(DEVNAME+"/device/warnings", WMAP)
     
-    #Temps cc stand for charge controller
+    mqttclient.publish(DEVNAME+"/dc/volts", BATTVOLTS)
+    ##mqttclient.publish(DEVNAME+"/dc/amps", BATTCURR)
+    mqttclient.publish(DEVNAME+"/dc/power", BATTWATTS)
+    
+    mqttclient.publish(DEVNAME+"/ac/volts", LOADACVOLT)
+    mqttclient.publish(DEVNAME+"/ac/amps", LOADACCURR)
+    mqttclient.publish(DEVNAME+"/ac/power", LOADACPOWER)
+    mqttclient.publish(DEVNAME+"/ac/freq", LOADACFREQ)
+    mqttclient.publish(DEVNAME+"/ac/VA", LOADPOWERVA)
+    
+    mqttclient.publish(DEVNAME+"/bat/kwhToday", BATKWHTDY) # energy taken from battery
+    
     mqttclient.publish(DEVNAME+"/bat/temp", BTEMP)
-    #mqttclient.publish(DEVNAME+"/cc/fets", FETTEMP)
-    #mqttclient.publish(DEVNAME+"/cc/pcb", PCBTEMP)
     
 def main(argv):
     global client		
     global SERIAL1
     global SERIAL2
 
-    if (sys.argv[1] == 'forceeq'): 
-        connect()
-        unlock(SERIAL1, SERIAL2)
-        forceeq(float(sys.argv[2]), int(sys.argv[3]))
-        close()
-
-    if (sys.argv[1] == 'forcefloat'): 
-        connect()
-        unlock(SERIAL1, SERIAL2)
-        forcefloat()
-        close()
-
-    if (sys.argv[1] == 'forcebulk'): 
-        connect()
-        unlock(SERIAL1, SERIAL2)
-        forcebulk()
-        close()
-
-    if (sys.argv[1] == 'limit'): 
-        connect()
-        unlock(SERIAL1, SERIAL2)
-        limitCurrent(int(sys.argv[2]))
-        close()
-    
-    if (sys.argv[1] == 'finishcharge'): 
-        connect()
-        unlock(SERIAL1, SERIAL2)
-        limitCurrent(0)
-        close()
-
     if (sys.argv[1] == 'readall'): 
         readAll()	
         
     if (sys.argv[1] == 'monitor'): 
         monitor()		  
-
-    print "Done."
-
-#Create a timer to publsh data every 5 seconds    
-#t = threading.Timer(5.0, mqttPub)
-#t.start()
+    if (sys.argv[1] == 'publish'):
+        mqttPub()
+    print("Done.")
 
 t=time.time()
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
-    # while True:
-#         if time.time()-t > 9:
-#             mqttPub()
-#             t=time.time()
+    while True:
+        if time.time()-t > 10:
+            for i in range(5):
+                try:
+                    mqttPub()
+                except TypeError as e:
+                    now = datetime.datetime.utcnow()
+                    logging.warning(str(now))
+                    logging.warning("Couldn't reach device, sleeping for 1s")
+
+                    time.sleep(1)
+                    continue
+                else:
+                    break
+            else:
+                now = datetime.datetime.utcnow()
+                logging.warning(str(now))
+                logging.warning("Tried 5 times, can't reach device")
+
+            t=time.time()
